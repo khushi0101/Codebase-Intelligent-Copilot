@@ -2,7 +2,7 @@
 
 **Ask questions about an unfamiliar codebase from your terminal and get answers grounded in real code, with `path:line` citations.**
 
-![status](https://img.shields.io/badge/status-working%20(phases%201--5)-brightgreen) ![layer](https://img.shields.io/badge/layer-retrieval%20%28RAG%29-blue) ![python](https://img.shields.io/badge/python-3.11+-informational)
+![status](https://img.shields.io/badge/status-working%20(phases%201--5%20%2B%20foundations)-brightgreen) ![layer](https://img.shields.io/badge/layer-retrieval%20%28RAG%29-blue) ![python](https://img.shields.io/badge/python-3.11+-informational)
 
 ```bash
 cd /path/to/any/repo
@@ -37,6 +37,8 @@ Code is a strong domain for RAG because correctness is **checkable**: a citation
 - Refuses out-of-scope questions (e.g. asking about auth in a repo that has none)
 - Incremental re-indexing: only changed, added, or deleted files are reprocessed
 - Works on any repo from its own folder, and keeps multiple indexed repos separate
+- Every call is traced to a local JSONL log (model, prompt version, latency, tokens) — a seed for the future Observability project, not a retrofit
+- The prompt is a versioned template file (`prompts/answer_v1.txt`), not a string literal, so an answer can be traced back to exactly which version produced it
 
 ---
 
@@ -98,6 +100,8 @@ flowchart LR
 | Fusion | Reciprocal Rank Fusion | Combines rankings without needing comparable scores |
 | LLM | Gemini 2.5 Flash (google-genai) | Fast and cheap, with retry and exponential backoff via tenacity |
 | CLI | Typer | `index` / `ask` / `chat` commands, defaulting to the current directory |
+| Config | `python-dotenv` + typed `config.py` | One place for DB/model/retrieval settings; env vars namespaced `CODECOPILOT_*` instead of generic names |
+| Tracing | Append-only JSONL (`tracing.py`) | Zero new infra; every call already has a span before the Observability project exists |
 
 No LangChain or other RAG framework. Every stage is written by hand so each one can be measured and swapped.
 
@@ -132,6 +136,8 @@ Measured results and the decisions they drove.
 | 4 | Call-graph expansion | On a real backend repo, traced `load_robot_types` → `startup` → `mqtt_ingest.start_listening` with line citations | Kept. Little gain on tiny repos, clear gain on real ones |
 | 4 | Duplicate function names across files | Name-only index silently overwrote entries | Keyed by `(file_path, function_name)`; callees prefer same-file matches |
 | 5 | Hash-based incremental indexing | Unchanged repo: no work. One edited file: only that file re-indexed | Kept, plus cleanup of deleted files |
+| 6 | Env-var config (`config.py`) | A generic `DB_HOST` key collided with an unrelated project's exported shell variable — silently connected to the wrong database | Namespaced every key as `CODECOPILOT_*` rather than relying on `.env` to override an already-set variable (it doesn't) |
+| 6 | Prompt versioning + request tracing, added ahead of schedule | No retrieval change — this is infrastructure | Kept. The build guide warns that retrofitting this across later projects is miserable; cheaper to do it once, now |
 
 ---
 
@@ -142,7 +148,7 @@ Measured results and the decisions they drove.
 | Retrieval recall@k | ✅ Measured: recall@5 = 100% on the gold set |
 | Refusal on out-of-scope questions | ✅ Checked manually on trick questions |
 | Citation validity | 🟡 Checker implemented (`evaluation_loop.py`), not yet run across the full gold set |
-| Latency P50 / P95 | ⬜ Not yet measured |
+| Latency P50 / P95 | 🟡 Instrumented (`tracing.py` → `traces.jsonl`, read by `latency_report.py`); not yet sampled across a representative run |
 
 **Caveat:** the gold set is small (11 scored questions) and built on this project's own codebase. 100% recall here is a sanity check, not a benchmark. Expanding it to ~50 questions on an external repo is the next step.
 
@@ -155,7 +161,6 @@ Measured results and the decisions they drove.
 - **Callee resolution is a heuristic.** Without import resolution, a call like `foo()` resolves to the same file first, then to any file defining `foo`.
 - **Call graph is rebuilt per question.** Fine for small and medium repos, slow on large ones until it's cached.
 - **No reranker or query rewriting yet** (originally planned for Phase 3).
-- **Database credentials are hardcoded** in `db_connection.py`. They should move to environment variables.
 - **Repo scoping uses a path prefix** (`LIKE '/repo/path%'`), so sibling folders sharing a prefix could overlap.
 
 ---
@@ -183,14 +188,14 @@ CREATE TABLE embeddings (
     chunk_length INTEGER
 );
 ```
-Then update the connection details in `db_connection.py`. The SQLite keyword index is created automatically on the first `index` run.
+Then set the connection details via environment variables — copy `.env.example` to `.env` (see step 2). Keys are namespaced `CODECOPILOT_*` so they won't collide with another project's env vars on your machine. The SQLite keyword index is created automatically on the first `index` run.
 
 ### 2. Install
 ```bash
 git clone https://github.com/khushi0101/codebase-copilot.git
 cd codebase-copilot
 pip install -e .
-export GEMINI_API_KEY=your_key_here
+cp .env.example .env               # fill in GEMINI_API_KEY; DB/model defaults work out of the box
 ```
 
 ### 3. Use
@@ -199,6 +204,7 @@ cd /path/to/repo/you/want/to/explore
 codecopilot index                         # first run indexes everything, later runs only changes
 codecopilot ask "where is the database connection set up?"
 codecopilot chat                          # interactive session, type 'exit' to quit
+python latency_report.py                  # P50/P95 latency from the trace log, once you've asked a few questions
 ```
 
 ---
@@ -212,12 +218,17 @@ codebase-copilot/
 ├── incremental_index.py   # hash-based change detection, Postgres + SQLite indexing
 ├── seed_data.py           # full rebuild of the vector table
 ├── embedder.py            # sentence-transformers embedding
-├── db_connection.py       # Postgres connection
+├── db_connection.py       # Postgres connection (reads config.py)
+├── config.py              # typed, namespaced (CODECOPILOT_*) settings — DB, models, retrieval k, trace path
 ├── search_query.py        # repo-scoped vector search + BM25 keyword search
 ├── ranking.py             # Reciprocal Rank Fusion
 ├── call_graph.py          # caller/callee index + related-chunk lookup
 ├── prompt.py              # prompt assembly with labeled related context
-├── ask.py                 # retrieval → expansion → Gemini, with retries
+├── prompt_registry.py     # loads versioned templates from prompts/
+├── prompts/answer_v1.txt  # the versioned prompt template
+├── tracing.py             # log_trace() + timed() — one JSON line per call, to traces.jsonl
+├── latency_report.py      # P50/P95 latency computed from traces.jsonl
+├── ask.py                 # retrieval → expansion → Gemini, with retries and tracing
 ├── gold_set.py            # hand-labeled question → expected function pairs
 ├── evaluation_script.py   # recall@k harness
 ├── evaluation_loop.py     # citation validity checker
@@ -239,7 +250,8 @@ codebase-copilot/
 - [ ] Multi-language support (JavaScript/TypeScript, Go) via per-language tree-sitter grammars
 - [ ] Cross-encoder reranking, measured against current recall
 - [ ] Larger external gold set (~50 questions) + citation validity numbers
-- [ ] Env-var config, cached call graph, hosted demo on a pre-indexed repo
+- [x] Env-var config — typed `config.py`, namespaced `CODECOPILOT_*` env vars
+- [ ] Cached call graph, hosted demo on a pre-indexed repo
 
 ### Non-goals (for now)
 - Writing or editing code (this is a *reading* copilot)

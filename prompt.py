@@ -1,3 +1,7 @@
+from config import PROMPT_VERSION
+from prompt_registry import load_prompt_template
+
+
 def format_chunk_block(file_path, start_line, end_line, text, label=None):
     header = f"File: {file_path} (lines {start_line}-{end_line})"
     if label:
@@ -5,7 +9,10 @@ def format_chunk_block(file_path, start_line, end_line, text, label=None):
     return f"{header}\n```\n{text}\n```"
 
 
-def build_prompt(question, chunks, related_chunks=None):
+def build_prompt(question, chunks, related_chunks=None, prompt_version=None):
+    """Returns (prompt_text, prompt_version) so the caller can log exactly
+    which template produced this answer."""
+    version = prompt_version or PROMPT_VERSION
     context_blocks = []
 
     for file_path, start_line, end_line, text, *_ in chunks:
@@ -18,16 +25,6 @@ def build_prompt(question, chunks, related_chunks=None):
             ))
 
     context = "\n\n".join(context_blocks)
-
-    prompt = f"""You are a codebase assistant. Answer the question using ONLY the code context below.
-        Always cite the file path and line numbers for any claim you make, in the format (file.py:12-20).
-        Some context is marked as "Related" — this is supplementary (callers or callees), not the primary match. Use it to enrich your answer, not as the main subject unless the question specifically asks about relationships.
-        If the context doesn't contain enough information to answer, say so — do not guess.
-
-        Context:
-        {context}
-
-        Question: {question}
-
-        Answer:"""
-    return prompt
+    template = load_prompt_template(version)
+    prompt = template.format(context=context, question=question)
+    return prompt, version

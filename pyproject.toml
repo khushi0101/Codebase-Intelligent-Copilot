@@ -12,6 +12,7 @@ dependencies = [
     "tree-sitter",
     "tree-sitter-python",
     "tenacity",
+    "python-dotenv",
 ]
 
 [tool.setuptools]
@@ -21,12 +22,16 @@ py-modules = [
     "search_query",
     "ranking",
     "prompt",
+    "prompt_registry",
     "call_graph",
     "read_repo",
     "incremental_index",
     "seed_data",
     "embedder",
     "db_connection",
+    "config",
+    "tracing",
+    "latency_report",
 ]
 
 [project.scripts]
