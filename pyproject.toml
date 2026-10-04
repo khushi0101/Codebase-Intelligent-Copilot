@@ -1,0 +1,37 @@
+[project]
+name = "codecopilot"
+version = "0.1.0"
+description = "A RAG-based CLI tool for asking questions about a codebase"
+requires-python = ">=3.11"
+dependencies = [
+    "typer",
+    "google-genai",
+    "sentence-transformers",
+    "psycopg2-binary",
+    "pgvector",
+    "tree-sitter",
+    "tree-sitter-python",
+    "tenacity",
+]
+
+[tool.setuptools]
+py-modules = [
+    "cli",
+    "ask",
+    "search_query",
+    "ranking",
+    "prompt",
+    "call_graph",
+    "read_repo",
+    "incremental_index",
+    "seed_data",
+    "embedder",
+    "db_connection",
+]
+
+[project.scripts]
+codecopilot = "cli:app"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"

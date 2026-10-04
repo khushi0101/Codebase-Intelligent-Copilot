@@ -1,0 +1,11 @@
+.env
+keyword_index.db
+index_state_*.json
+testing/
+sample_test_data_repo/
+__pycache__/
+*.pyc
+*.egg-info/
+venv/
+.venv/
+.DS_Store
