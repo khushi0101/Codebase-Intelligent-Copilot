@@ -50,6 +50,34 @@ def evaluate_recall(k=3, repo_path="."):
     return recall
 
 
+def run_recall_eval(ks=(3, 5, 10), repo_path="."):
+    """Structured version of evaluate_recall for the web UI: one row per gold
+    question with hit/miss per k, plus recall per k. Trick questions are
+    returned (scored=False) but excluded from recall, same as above."""
+    rows = []
+    for item in gold_set:
+        row = {**item, "scored": item["expected_function"] is not None, "hits": {}}
+        for k in ks:
+            vector_results = vector_search(item["question"], repo_path, top_k=k)
+            keyword_results = keyword_search(item["question"], repo_path, top_k=k)
+            top_chunks = reciprocal_rank_fusion([vector_results, keyword_results])[:k]
+            if row["scored"]:
+                row["hits"][k] = any(
+                    chunk_matches_expected(chunk, item["expected_function"], item["expected_file"])
+                    for chunk in top_chunks
+                )
+            else:
+                row["hits"][k] = None
+        rows.append(row)
+
+    scored = [r for r in rows if r["scored"]]
+    recall = {
+        k: (sum(1 for r in scored if r["hits"][k]) / len(scored) if scored else 0)
+        for k in ks
+    }
+    return {"rows": rows, "recall": recall, "scored_total": len(scored)}
+
+
 if __name__ == "__main__":
     import sys
 

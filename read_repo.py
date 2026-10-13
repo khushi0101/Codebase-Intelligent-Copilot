@@ -10,8 +10,10 @@ def list_python_files(repo_path):
     python_files = []
     for root, dirs, files in os.walk(repo_path):
         for file in files:
-            if file.endswith(".py"):
-                python_files.append(os.path.join(root, file))
+            path = os.path.join(root, file)
+            # skip symlinks: a linked "x.py" could point at any file on the machine
+            if file.endswith(".py") and not os.path.islink(path):
+                python_files.append(path)
     return python_files
 
 

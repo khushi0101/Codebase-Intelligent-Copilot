@@ -38,5 +38,13 @@ def chat(repo_path: str = "."):
         typer.echo(f"\n{answer}\n")
 
 
+@app.command()
+def serve(host: str = "127.0.0.1", port: int = 8000):
+    """Start the web UI + API (build the UI first: cd web && npm install && npm run build)."""
+    import uvicorn
+    typer.echo(f"Codebase Copilot UI on http://{host}:{port}")
+    uvicorn.run("api:app", host=host, port=port)
+
+
 if __name__ == "__main__":
     app()

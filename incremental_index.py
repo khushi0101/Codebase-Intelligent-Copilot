@@ -4,11 +4,10 @@ import hashlib
 
 from read_repo import list_python_files, chunk_file
 from db_connection import connection
-from pgvector.psycopg2 import register_vector
+from psycopg2.extras import execute_values
 from embedder import encodings
 import sqlite3
 
-register_vector(connection)
 
 def ensure_sqlite_table():
     conn = sqlite3.connect("keyword_index.db")
@@ -75,6 +74,7 @@ def delete_old_chunks_postgres(file_path):
         cursor.execute("DELETE FROM embeddings WHERE file_path = %s", (file_path,))
         connection.commit()
     except Exception as e:
+        connection.rollback()
         print(f"Error deleting old Postgres chunks for {file_path}: {e}")
     finally:
         cursor.close()
@@ -93,33 +93,40 @@ def delete_old_chunks_sqlite(file_path):
         conn.close()
 
 
-def insert_chunk_postgres(chunk):
+def insert_chunks_postgres(chunks):
+    """One round trip and one commit per file instead of per chunk. Matters when
+    Postgres is remote (e.g. Neon), where each commit costs a network round trip."""
+    if not chunks:
+        return
     cursor = connection.cursor()
     try:
-        cursor.execute(
-            "INSERT INTO embeddings (sentence, embedding, file_path, start_line, end_line, chunk_length) VALUES (%s, %s, %s, %s, %s, %s)",
-            (chunk["text"], chunk["embedding"].tolist(), chunk["file_path"], chunk["start_line"], chunk["end_line"], chunk["length"])
+        execute_values(
+            cursor,
+            "INSERT INTO embeddings (sentence, embedding, file_path, start_line, end_line, chunk_length) VALUES %s",
+            [(c["text"], c["embedding"].tolist(), c["file_path"], c["start_line"], c["end_line"], c["length"]) for c in chunks],
+            template="(%s, %s::vector, %s, %s, %s, %s)",
         )
         connection.commit()
     except Exception as e:
-        print(f"Error inserting Postgres chunk for '{chunk['file_path']}': {e}")
+        connection.rollback()
+        print(f"Error inserting Postgres chunks for '{chunks[0]['file_path']}': {e}")
     finally:
         cursor.close()
 
 
-def insert_chunk_sqlite(chunk):
+def insert_chunks_sqlite(chunks):
+    if not chunks:
+        return
     conn = sqlite3.connect("keyword_index.db")
-    cursor = conn.cursor()
     try:
-        cursor.execute(
+        conn.executemany(
             "INSERT INTO chunks_fts (text, file_path, start_line, end_line) VALUES (?, ?, ?, ?)",
-            (chunk["text"], chunk["file_path"], chunk["start_line"], chunk["end_line"])
+            [(c["text"], c["file_path"], c["start_line"], c["end_line"]) for c in chunks],
         )
         conn.commit()
     except Exception as e:
-        print(f"Error inserting SQLite chunk for '{chunk['file_path']}': {e}")
+        print(f"Error inserting SQLite chunks for '{chunks[0]['file_path']}': {e}")
     finally:
-        cursor.close()
         conn.close()
 
 
@@ -129,26 +136,48 @@ def reindex_file(path):
     delete_old_chunks_sqlite(path)
 
     chunks = chunk_file(path)
-    for chunk in chunks:
-        chunk["embedding"] = encodings(chunk["text"])
-        insert_chunk_postgres(chunk)
-        insert_chunk_sqlite(chunk)
+    if chunks:
+        # one batched encode per file is much faster than one call per function
+        embeddings = encodings([chunk["text"] for chunk in chunks])
+        for chunk, embedding in zip(chunks, embeddings):
+            chunk["embedding"] = embedding
+    insert_chunks_postgres(chunks)
+    insert_chunks_sqlite(chunks)
 
     print(f"  -> {len(chunks)} chunks re-indexed")
+    return len(chunks)
 
 
-def run_incremental_index(repo_path):
+def run_incremental_index(repo_path, on_progress=None, full=False):
+    """on_progress, if given, receives event dicts (stage/start/file/deleted/done)
+    so a caller like the web UI can show live progress. full=True ignores the
+    saved hashes and re-indexes every file. Returns a summary dict."""
+    emit = on_progress or (lambda event: None)
+
+    emit({"type": "stage", "message": "Scanning for Python files"})
     ensure_sqlite_table()
     hash_file = get_hash_file_path(repo_path)
     python_files = list_python_files(repo_path)
-    previous_hashes = load_previous_hashes(hash_file)
+    previous_hashes = {} if full else load_previous_hashes(hash_file)
 
     changed_files, current_hashes = get_changed_files(python_files, previous_hashes)
     deleted_files = get_deleted_files(python_files, previous_hashes)
+    if full:
+        # previous hashes were ignored, so stale entries for removed files must come from the state file
+        deleted_files = set(load_previous_hashes(hash_file)) - set(python_files)
+
+    summary = {
+        "total_files": len(python_files),
+        "changed_files": len(changed_files),
+        "deleted_files": len(deleted_files),
+        "chunks_indexed": 0,
+    }
+    emit({"type": "start", **summary})
 
     if not changed_files and not deleted_files:
         print("No files changed or deleted since last index. Nothing to do.")
-        return
+        emit({"type": "done", **summary})
+        return summary
 
     if deleted_files:
         print(f"{len(deleted_files)} file(s) deleted since last index.")
@@ -156,14 +185,19 @@ def run_incremental_index(repo_path):
             print(f"Removing chunks for deleted file: {path}")
             delete_old_chunks_postgres(path)
             delete_old_chunks_sqlite(path)
+            emit({"type": "deleted", "path": path})
 
     if changed_files:
         print(f"{len(changed_files)} file(s) changed or added out of {len(python_files)} total.")
-        for path in changed_files:
-            reindex_file(path)
+        for i, path in enumerate(changed_files, start=1):
+            n = reindex_file(path)
+            summary["chunks_indexed"] += n
+            emit({"type": "file", "path": path, "chunks": n, "done": i, "total": len(changed_files)})
 
     save_hashes(hash_file, current_hashes)
     print("Index state updated.")
+    emit({"type": "done", **summary})
+    return summary
 
 
 if __name__ == "__main__":

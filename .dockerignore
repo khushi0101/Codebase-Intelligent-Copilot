@@ -1,0 +1,16 @@
+.env
+.git
+.venv
+venv
+__pycache__
+*.pyc
+*.egg-info
+keyword_index.db
+index_state_*.json
+traces.jsonl
+repos.json
+testing
+sample_test_data_repo
+web/node_modules
+web/dist
+.DS_Store

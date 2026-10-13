@@ -1,11 +1,9 @@
 from db_connection import connection
-from pgvector.psycopg2 import register_vector
 from embedder import encodings
 import sqlite3
 import re
 
 
-register_vector(connection)
 
 def sanitize_query(text):
     
@@ -29,6 +27,8 @@ def vector_search(query, repo_path, top_k=3):
         results = cursor.fetchall()
     except Exception as e:
         print(f"Vector Search Error for '{query}': {e}")
+        # an aborted transaction would otherwise poison the shared connection for every later query
+        connection.rollback()
         results = []
     finally:
         cursor.close()

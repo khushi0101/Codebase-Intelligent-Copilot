@@ -11,6 +11,8 @@ codecopilot chat       # ask questions interactively
 > what would break if I changed load_robot_types?
 ```
 
+Or use the **web app**: `codecopilot serve` opens a full UI with streaming answers, clickable verified citations, a code explorer with call graphs, a retrieval inspector, and latency/eval dashboards. It can also run as a public demo where anyone pastes a GitHub repo (see [DEPLOY.md](DEPLOY.md)).
+
 ---
 
 ## 📌 The Problem
@@ -39,6 +41,15 @@ Code is a strong domain for RAG because correctness is **checkable**: a citation
 - Works on any repo from its own folder, and keeps multiple indexed repos separate
 - Every call is traced to a local JSONL log (model, prompt version, latency, tokens) — a seed for the future Observability project, not a retrofit
 - The prompt is a versioned template file (`prompts/answer_v1.txt`), not a string literal, so an answer can be traced back to exactly which version produced it
+
+### Web app
+| Page | What it does |
+|---|---|
+| **Ask** | Streaming answers; every `path:line` citation is a chip that opens the exact lines. Green = the lines were in the retrieved context (verified with `evaluation_loop.py`'s checker), amber = not. The evidence panel shows each chunk's vector rank, BM25 rank, and RRF score, plus call-graph neighbours |
+| **Explore** | File tree of the indexed repo, syntax-highlighted source, and per-function callers/callees from `call_graph.py` |
+| **Retrieval** | Vector vs BM25 vs fused results side by side for any query, with no LLM involved |
+| **Insights** | P50/P95 latency split into retrieval vs generation, token usage, the trace log, and a one-click recall@k run of the gold set |
+| **Repositories** | Add a local folder or a public GitHub URL, run incremental updates with live progress, rebuild, or remove |
 
 ---
 
@@ -138,6 +149,10 @@ Measured results and the decisions they drove.
 | 5 | Hash-based incremental indexing | Unchanged repo: no work. One edited file: only that file re-indexed | Kept, plus cleanup of deleted files |
 | 6 | Env-var config (`config.py`) | A generic `DB_HOST` key collided with an unrelated project's exported shell variable — silently connected to the wrong database | Namespaced every key as `CODECOPILOT_*` rather than relying on `.env` to override an already-set variable (it doesn't) |
 | 6 | Prompt versioning + request tracing, added ahead of schedule | No retrieval change — this is infrastructure | Kept. The build guide warns that retrofitting this across later projects is miserable; cheaper to do it once, now |
+| 7 | Web UI + API (`api.py`) over the same modules | tree-sitter 0.26.0 segfaulted while walking some larger files (reproduced on `api.py` itself), so `build_call_graph` crashed the process | Pinned `tree-sitter<0.26`. Call-graph expansion now works on this repo |
+| 7 | Re-ran the gold set after the repo grew (`api.py` added 35 functions) | recall@5 fell from 100% to 80%: new functions such as `api_search` compete for questions like "how does keyword search work?" | Kept as a measured regression. The gold set needs to grow with the corpus (see Next) |
+| 7 | Looked at BM25's contribution in the retrieval inspector | FTS5 `MATCH` with a multi-word natural-language question requires *every* term, so BM25 returns nothing for most questions and RRF is effectively vector-only | Open: OR the query terms (or use FTS5 `NEAR`/prefix queries) and re-measure recall |
+| 7 | Hosted demo | Batched embedding + one Postgres round trip per file (instead of per function) | A 15-file repo indexes in ~5 s against a remote database |
 
 ---
 
@@ -198,7 +213,14 @@ pip install -e .
 cp .env.example .env               # fill in GEMINI_API_KEY; DB/model defaults work out of the box
 ```
 
-### 3. Use
+### 3. Web app
+```bash
+cd web && npm install && npm run build && cd ..   # build the UI once
+codecopilot serve                                 # http://127.0.0.1:8000
+```
+For UI development, run `codecopilot serve` and `cd web && npm run dev` (Vite on :5173, proxies `/api`).
+
+### 4. CLI
 ```bash
 cd /path/to/repo/you/want/to/explore
 codecopilot index                         # first run indexes everything, later runs only changes
@@ -213,7 +235,12 @@ python latency_report.py                  # P50/P95 latency from the trace log, 
 
 ```
 codebase-copilot/
-├── cli.py                 # Typer CLI: index / ask / chat
+├── cli.py                 # Typer CLI: index / ask / chat / serve
+├── api.py                 # FastAPI layer for the web UI (+ public-demo guards)
+├── github_source.py       # safe public-GitHub tarball fetch (.py files only)
+├── web/                   # React + Vite UI; web/functions = Cloudflare Pages /api proxy
+├── Dockerfile             # backend image for the hosted demo (see DEPLOY.md)
+├── schema.sql             # pgvector table setup
 ├── read_repo.py           # file walking + tree-sitter function-level chunking
 ├── incremental_index.py   # hash-based change detection, Postgres + SQLite indexing
 ├── seed_data.py           # full rebuild of the vector table
@@ -251,7 +278,9 @@ codebase-copilot/
 - [ ] Cross-encoder reranking, measured against current recall
 - [ ] Larger external gold set (~50 questions) + citation validity numbers
 - [x] Env-var config — typed `config.py`, namespaced `CODECOPILOT_*` env vars
-- [ ] Cached call graph, hosted demo on a pre-indexed repo
+- [ ] Cached call graph
+- [x] Web UI + hosted demo on a pre-indexed repo ([DEPLOY.md](DEPLOY.md))
+- [ ] BM25 query rewriting (OR terms) so keyword search contributes to natural-language questions
 
 ### Non-goals (for now)
 - Writing or editing code (this is a *reading* copilot)

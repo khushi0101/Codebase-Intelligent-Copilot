@@ -9,10 +9,12 @@ dependencies = [
     "sentence-transformers",
     "psycopg2-binary",
     "pgvector",
-    "tree-sitter",
+    "tree-sitter>=0.25,<0.26",  # 0.26.0 segfaults while walking some larger files
     "tree-sitter-python",
     "tenacity",
     "python-dotenv",
+    "fastapi",
+    "uvicorn[standard]",
 ]
 
 [tool.setuptools]
@@ -32,6 +34,10 @@ py-modules = [
     "config",
     "tracing",
     "latency_report",
+    "api",
+    "evaluation_script",
+    "evaluation_loop",
+    "gold_set",
 ]
 
 [project.scripts]

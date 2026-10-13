@@ -1,9 +1,7 @@
 from db_connection import connection
-from pgvector.psycopg2 import register_vector
 from embedder import encodings
 from read_repo import get_all_chunks
 
-register_vector(connection)
 
 
 def clear_embeddings_table():
